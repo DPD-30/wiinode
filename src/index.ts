@@ -1,7 +1,7 @@
 import * as HID from "node-hid";
 
 export class Remote {
-	private hid: HID.HID;
+	private hid: any;
 	private listeners: { [button: string]: ((pressed: boolean) => void)[] } = {};
 	private ledRumbleByte: number = 0;
 
@@ -28,22 +28,26 @@ export class Remote {
 	public irx: number[] = [1023, 1023, 1023, 1023];
 	public iry: number[] = [1023, 1023, 1023, 1023];
 
-	constructor(devicePath: string) {
-		this.devicePath = devicePath;
-		this.hid = new HID.HID(devicePath);
-		this.hid.write([0x12, 0x00, 0x37]);
-		this.hid.on("data", data => this.processData(data));
+	private constructor() {}
+
+	public static async create(devicePath: string): Promise<Remote> {
+		const remote = new Remote();
+		remote.devicePath = devicePath;
+		remote.hid = await HID.HIDAsync.open(devicePath);
+		await remote.hid.write([0x12, 0x00, 0x37]);
+		remote.hid.on("data", data => remote.processData(data));
+		return remote;
 	}
 
-	public disconnect(): void {
+	public async disconnect(): Promise<void> {
 		if (!this.hid) {
 			return;
 		}
 
 		// Turn off LEDs and stop rumble
-		this.hid.write([0x11, 0x00]);
+		await this.hid.write([0x11, 0x00]);
 
-		this.hid.close();
+		await this.hid.close();
 		this.hid = undefined;
 
 		for (let i = 0; i < remotes.length; ) {
@@ -163,38 +167,38 @@ export class Remote {
 		// TODO: Camera
 	}
 
-	public rumble(msecs?: number): void {
+	public async rumble(msecs?: number): Promise<void> {
 		if (msecs === undefined || msecs === null) msecs = 128;
 		if (msecs > 1000) msecs = 1000;
 
 		if (msecs <= 0) {
 			this.ledRumbleByte &= 0xfe;
-			this.hid.write([0x11, this.ledRumbleByte]);
+			await this.hid.write([0x11, this.ledRumbleByte]);
 			return;
 		}
 
 		this.ledRumbleByte |= 0x01;
-		this.hid.write([0x11, this.ledRumbleByte]);
+		await this.hid.write([0x11, this.ledRumbleByte]);
 
-		setTimeout(() => {
+		setTimeout(async () => {
 			this.ledRumbleByte &= 0xfe;
 			if (this.hid) {
-				this.hid.write([0x11, this.ledRumbleByte]);
+				await this.hid.write([0x11, this.ledRumbleByte]);
 			}
 		}, msecs);
 	}
 
-	public setLed(id: number, rumbleMsecs?: number): void {
-		this.setLeds(id === 1, id === 2, id === 3, id === 4, rumbleMsecs);
+	public async setLed(id: number, rumbleMsecs?: number): Promise<void> {
+		await this.setLeds(id === 1, id === 2, id === 3, id === 4, rumbleMsecs);
 	}
 
-	public setLeds(
+	public async setLeds(
 		led1: boolean,
 		led2: boolean,
 		led3: boolean,
 		led4: boolean,
 		rumbleMsecs?: number
-	): void {
+	): Promise<void> {
 		this.ledRumbleByte &= 0x0f;
 		this.ledRumbleByte |= led1 ? 0x10 : 0x00;
 		this.ledRumbleByte |= led2 ? 0x20 : 0x00;
@@ -204,11 +208,11 @@ export class Remote {
 		if (rumbleMsecs === undefined || rumbleMsecs === null) rumbleMsecs = 0;
 
 		// This method also sends the LED data
-		this.rumble(rumbleMsecs);
+		await this.rumble(rumbleMsecs);
 	}
 
-	public setLedToPlayer(rumbleMsecs?: number): void {
-		this.setLed(this.player, rumbleMsecs);
+	public async setLedToPlayer(rumbleMsecs?: number): Promise<void> {
+		await this.setLed(this.player, rumbleMsecs);
 	}
 }
 
@@ -221,10 +225,10 @@ export interface ScanResult {
 	players: { [player: number]: Remote };
 }
 
-export function scanRemotes(assignPlayers?: boolean): ScanResult {
+export async function scanRemotes(assignPlayers?: boolean): Promise<ScanResult> {
 	if (assignPlayers === undefined) assignPlayers = true;
 
-	const devices = HID.devices().filter(device => {
+	const devices = (await HID.devicesAsync()).filter(device => {
 		console.log(device.manufacturer, device.product);
 		return (
 			device.vendorId === 0x057e &&
@@ -248,40 +252,39 @@ export function scanRemotes(assignPlayers?: boolean): ScanResult {
 	});
 
 	const newRemotesByPath: { [path: string]: Remote } = {};
-	devices.forEach(device => {
-		let remote = remotes[device.path];
+	for (const device of devices) {
+		let remote = remotes.find(r => r.devicePath === device.path);
 		if (remote === undefined) {
-			remote = new Remote(device.path);
+			remote = await Remote.create(device.path);
 			result.appeared.push(remote);
 		}
 
 		newRemotesByPath[device.path] = remote;
 		result.all.push(remote);
-	});
+	}
 
-	Object.keys(remotes).forEach(path => {
-		if (newRemotesByPath[path] === undefined) {
-			const disappeared = remotes[path];
-			if (disappeared.player) {
-				delete result.players[disappeared.player];
+	for (const remote of remotes) {
+		if (!newRemotesByPath[remote.devicePath]) {
+			if (remote.player) {
+				delete result.players[remote.player];
 			}
 
-			disappeared.disconnect();
-			result.disappeared.push(disappeared);
+			await remote.disconnect();
+			result.disappeared.push(remote);
 		}
-	});
+	}
 
 	if (assignPlayers && result.appeared.length) {
 		let nextFreePlayer = 1;
 		while (nextFreePlayer <= 4 && result.players[nextFreePlayer])
 			nextFreePlayer++;
 
-		result.appeared.forEach(appeared => {
+		for (const appeared of result.appeared) {
 			if (!appeared.player) {
 				appeared.player = nextFreePlayer++;
-				appeared.setLedToPlayer(200);
+				await appeared.setLedToPlayer(200);
 			}
-		});
+		}
 	}
 
 	remotes = result.all;
