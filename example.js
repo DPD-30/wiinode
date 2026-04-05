@@ -1,7 +1,7 @@
 const { scanRemotes } = require('./lib');
 
 async function main() {
-    let result = await scanRemotes();
+    let result = await scanRemotes(true,true);
 
     if (result.all.length === 0) {
         console.log('No Wii remotes found');

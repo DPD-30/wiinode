@@ -28,15 +28,60 @@ export class Remote {
 	public irx: number[] = [1023, 1023, 1023, 1023];
 	public iry: number[] = [1023, 1023, 1023, 1023];
 
+	// Nunchuk extension
+	public nunchukConnected: boolean = false;
+	public nunchukStickX: number = 128;
+	public nunchukStickY: number = 128;
+	public nunchukButtonC: boolean = false;
+	public nunchukButtonZ: boolean = false;
+	public nunchukAccelX: number = 0;
+	public nunchukAccelY: number = 0;
+	public nunchukAccelZ: number = 0;
+
+	private debugLogged: boolean = false;
+    private debugLogCount: number = 0; 
 	private constructor() {}
 
-	public static async create(devicePath: string): Promise<Remote> {
+	public static async create(devicePath: string, enableNunchuk: boolean = false): Promise<Remote> {
 		const remote = new Remote();
 		remote.devicePath = devicePath;
 		remote.hid = await HID.HIDAsync.open(devicePath);
+
+		// Initialize IR sensor (required for basic operation)
 		await remote.hid.write([0x12, 0x00, 0x37]);
-		remote.hid.on("data", data => remote.processData(data));
+
+		// Start listening for data BEFORE Nunchuk init so we don't block button presses
+		remote.hid.on("data", data => remote.processData(data, enableNunchuk));
+
+		// Initialize Nunchuk extension if requested (non-blocking after this point)
+		if (enableNunchuk) {
+			remote.initializeNunchuk();  // Don't await - let it run in background
+		}
+
 		return remote;
+	}
+
+	private async initializeNunchuk(): Promise<void> {
+		// Enable extension controller passthrough
+		// Step 1: Write 0x55 to 0xA400F0 (initialize)
+		await this.hid.write([0x16, 0x00, 0xA4, 0x00, 0xF0, 0x55]);
+		await this.sleep(10);
+
+		// Step 2: Write 0x00 to 0xA400FB (enable Nunchuk extension)
+		// Note: Must use 0xFB, not 0xF0
+		await this.hid.write([0x16, 0x00, 0xA4, 0x00, 0xFB, 0x00]);
+		await this.sleep(10);
+
+		// Step 3: Request data reports with extension data
+		// Mode 0x35 = Buttons + Accelerometer + Extension (21 bytes)
+		await this.hid.write([0x12, 0x00, 0x35]);
+
+		// Nunchuk will be detected when valid data arrives
+		// Don't set connected yet - wait for valid data
+	}
+
+	private sleep(ms: number): Promise<void> {
+		return new Promise(resolve => setTimeout(resolve, ms));
 	}
 
 	public async disconnect(): Promise<void> {
@@ -78,7 +123,7 @@ export class Remote {
 		buttonListeners.push(listener);
 	}
 
-	private processData(data: Uint8Array): void {
+	private processData(data: Uint8Array, nunchukEnabled: boolean = false): void {
 		if (data.length < 17) {
 			return;
 		}
@@ -165,6 +210,51 @@ export class Remote {
 		}
 
 		// TODO: Camera
+
+		// Nunchuk extension data
+		if (nunchukEnabled) {
+			this.processNunchukData(data);
+		}
+	}
+
+	private processNunchukData(data: Uint8Array): void {
+		// Debug: log first few packets
+		if (this.debugLogCount < 5) {
+			this.debugLogCount++;
+			console.log(`Nunchuk packet ${this.debugLogCount}: bytes6-11=${Array.from(data.slice(6, 12)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+		}
+
+		const rawStickX = data[6];
+		const rawStickY = data[7];
+		const rawButtons = data[11];
+
+		// Skip invalid packets (all 0xFF or all 0x00 means no extension)
+		if ((rawStickX === 0xFF && rawStickY === 0xFF) || (rawStickX === 0x00 && rawStickY === 0x00)) {
+			return;
+		}
+
+		// Stick values (0-255, center ~128)
+		this.nunchukStickX = rawStickX;
+		this.nunchukStickY = rawStickY;
+
+		// Buttons: active-low (0=pressed, 1=released), bits 0-1 of byte 11
+		const buttonC = !(rawButtons & 0x02);
+		const buttonZ = !(rawButtons & 0x01);
+
+		if (this.nunchukButtonC !== buttonC) {
+			this.notifyListeners("nunchuk-c", buttonC);
+		}
+		this.nunchukButtonC = buttonC;
+
+		if (this.nunchukButtonZ !== buttonZ) {
+			this.notifyListeners("nunchuk-z", buttonZ);
+		}
+		this.nunchukButtonZ = buttonZ;
+
+		// Accelerometer (6 bits each)
+		this.nunchukAccelX = ((data[8] & 0xFC) << 2) | ((rawButtons >> 6) & 0x03);
+		this.nunchukAccelY = ((data[9] & 0xFC) << 2) | ((rawButtons >> 4) & 0x03);
+		this.nunchukAccelZ = ((data[10] & 0xFC) << 2) | ((rawButtons >> 2) & 0x03);
 	}
 
 	public async rumble(msecs?: number): Promise<void> {
@@ -225,8 +315,9 @@ export interface ScanResult {
 	players: { [player: number]: Remote };
 }
 
-export async function scanRemotes(assignPlayers?: boolean): Promise<ScanResult> {
+export async function scanRemotes(assignPlayers?: boolean, enableNunchuk?: boolean): Promise<ScanResult> {
 	if (assignPlayers === undefined) assignPlayers = true;
+	if (enableNunchuk === undefined) enableNunchuk = false;
 
 	const devices = (await HID.devicesAsync()).filter(device => {
 		console.log(device.manufacturer, device.product);
@@ -255,7 +346,7 @@ export async function scanRemotes(assignPlayers?: boolean): Promise<ScanResult> 
 	for (const device of devices) {
 		let remote = remotes.find(r => r.devicePath === device.path);
 		if (remote === undefined) {
-			remote = await Remote.create(device.path);
+			remote = await Remote.create(device.path, enableNunchuk);
 			result.appeared.push(remote);
 		}
 
