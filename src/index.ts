@@ -39,7 +39,7 @@ export class Remote {
 	public nunchukAccelZ: number = 0;
 
 	private debugLogged: boolean = false;
-    private debugLogCount: number = 0; 
+    private debugLogCount: number = 5; 
 	private constructor() {}
 
 	public static async create(devicePath: string, enableNunchuk: boolean = false): Promise<Remote> {
@@ -232,6 +232,9 @@ export class Remote {
 		if ((rawStickX === 0xFF && rawStickY === 0xFF) || (rawStickX === 0x00 && rawStickY === 0x00)) {
 			return;
 		}
+
+		// Mark nunchuk as connected when we receive valid data
+		this.nunchukConnected = true;
 
 		// Stick values (0-255, center ~128)
 		this.nunchukStickX = rawStickX;
