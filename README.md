@@ -5,6 +5,10 @@ A node library for the Nintendo<sup>®</sup> Wii Remote (Wiimote), using [node-h
 
 updated to support WII Nunchuk.  Also now uses node-hid async setup.  
 
+## Updates
+0.2.0 added disconnect timeout 2000ms 
+also added error event data.  
+
 ## Installation
 
 ```

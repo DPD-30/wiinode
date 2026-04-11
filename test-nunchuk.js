@@ -68,6 +68,17 @@ async function main() {
         });
     });
 
+    // Disconnect event
+    remote.on('disconnect', () => {
+        log('DISCONNECT: Wiimote disconnected!');
+        log('Power cycle the Wiimote and restart to reconnect.');
+    });
+
+    // Error event
+    remote.on('error', (err) => {
+        log(`ERROR: ${err.message}`);
+    });
+
     // Nunchuk stick - track directions
     let lastStickDir = null;
     const deadzone = 25;

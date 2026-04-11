@@ -2,8 +2,11 @@ import * as HID from "node-hid";
 
 export class Remote {
 	private hid: any;
-	private listeners: { [button: string]: ((pressed: boolean) => void)[] } = {};
+	private listeners: { [event: string]: ((...args: any[]) => void)[] } = {};
 	private ledRumbleByte: number = 0;
+	private dataTimeoutTimer: NodeJS.Timeout | null = null;
+	private lastDataTime: number = 0;
+	private readonly DATA_TIMEOUT_MS = 2000; // 2 seconds without data = disconnected
 
 	public devicePath: string;
 	public player: number;
@@ -51,7 +54,25 @@ export class Remote {
 		await remote.hid.write([0x12, 0x00, 0x37]);
 
 		// Start listening for data BEFORE Nunchuk init so we don't block button presses
-		remote.hid.on("data", data => remote.processData(data, enableNunchuk));
+		remote.hid.on("data", data => {
+			remote.lastDataTime = Date.now();
+			remote.clearDataTimeout();
+			remote.processData(data, enableNunchuk);
+			remote.startDataTimeout();
+		});
+
+		// Handle HID device errors
+		remote.hid.on("error", err => {
+			remote.emitDisconnect();
+		});
+
+		// Handle HID close
+		remote.hid.on("close", () => {
+			remote.emitDisconnect();
+		});
+
+		// Start data timeout timer
+		remote.startDataTimeout();
 
 		// Initialize Nunchuk extension if requested (non-blocking after this point)
 		if (enableNunchuk) {
@@ -84,10 +105,46 @@ export class Remote {
 		return new Promise(resolve => setTimeout(resolve, ms));
 	}
 
+	private startDataTimeout(): void {
+		if (this.dataTimeoutTimer) {
+			clearTimeout(this.dataTimeoutTimer);
+		}
+		this.dataTimeoutTimer = setTimeout(() => {
+			const elapsed = Date.now() - this.lastDataTime;
+			if (elapsed > this.DATA_TIMEOUT_MS) {
+				this.emitDisconnect();
+			}
+		}, this.DATA_TIMEOUT_MS + 100); // Check slightly after timeout threshold
+	}
+
+	private clearDataTimeout(): void {
+		if (this.dataTimeoutTimer) {
+			clearTimeout(this.dataTimeoutTimer);
+			this.dataTimeoutTimer = null;
+		}
+	}
+
+	private emitDisconnect(): void {
+		this.clearDataTimeout();
+		// Emit disconnect event if listeners are registered
+		const disconnectListeners = this.listeners["disconnect"];
+		if (disconnectListeners && disconnectListeners.length > 0) {
+			disconnectListeners.forEach(listener => listener(true));
+		}
+		// Also emit error for unhandled cases
+		const errorListeners = this.listeners["error"];
+		if (errorListeners && errorListeners.length > 0) {
+			errorListeners.forEach(listener => listener(new Error("could not read from HID device - timeout")));
+		}
+	}
+
 	public async disconnect(): Promise<void> {
 		if (!this.hid) {
 			return;
 		}
+
+		// Clear timeout so it doesn't fire during clean disconnect
+		this.clearDataTimeout();
 
 		// Turn off LEDs and stop rumble
 		await this.hid.write([0x11, 0x00]);
